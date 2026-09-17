@@ -33,6 +33,19 @@ enum TestEnum {
     Case3(TestTupleStruct) = 42u16,
 }
 
+#[repr(u16)]
+#[derive(Debug, Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
+enum TestNamedFieldEnum {
+    NamedCase { item1: Option<u8>, item2: u64 } = 100u16,
+}
+
+#[repr(u16)]
+#[derive(Debug, Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
+enum TestMultiFieldEnum {
+    TupleCase(u8, u16) = 7u16,
+    NamedCase { a: u8, b: Vec<u8> } = 9u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
 struct TestGeneric<T: MlsSize + MlsEncode + MlsDecode>(T);
 
@@ -106,6 +119,35 @@ fn round_trip_enum_encode_one_tuple() {
 }
 
 #[test]
+fn round_trip_enum_named_field() {
+    let item = TestNamedFieldEnum::NamedCase {
+        item1: Some(42),
+        item2: 84,
+    };
+
+    let serialized = item.mls_encode_to_vec().unwrap();
+    let decoded = TestNamedFieldEnum::mls_decode(&mut &*serialized).unwrap();
+
+    assert_eq!(decoded, item);
+}
+
+#[test]
+fn round_trip_enum_multiple_fields() {
+    let tuple = TestMultiFieldEnum::TupleCase(3, 4);
+    let named = TestMultiFieldEnum::NamedCase {
+        a: 1,
+        b: vec![5, 6],
+    };
+
+    for item in [tuple, named] {
+        let serialized = item.mls_encode_to_vec().unwrap();
+        let decoded = TestMultiFieldEnum::mls_decode(&mut &*serialized).unwrap();
+
+        assert_eq!(decoded, item);
+    }
+}
+
+#[test]
 fn round_trip_custom_module_struct() {
     #[derive(Debug, PartialEq, Eq, Clone, MlsSize, MlsEncode, MlsDecode)]
     struct TestCustomStruct {
@@ -137,6 +179,26 @@ fn round_trip_custom_module_enum() {
 
     let decoded = TestCustomEnum::mls_decode(&mut &*serialized).unwrap();
     assert_eq!(item, decoded)
+}
+
+#[test]
+fn round_trip_custom_module_named_field_enum() {
+    #[derive(Debug, PartialEq, Eq, Clone, MlsSize, MlsEncode, MlsDecode)]
+    #[repr(u16)]
+    enum TestCustomNamedEnum {
+        CustomNamedCase {
+            #[mls_codec(with = "self::test_with")]
+            value: u8,
+        } = 2u16,
+    }
+
+    let item = TestCustomNamedEnum::CustomNamedCase { value: 33 };
+
+    let serialized = item.mls_encode_to_vec().unwrap();
+    assert_eq!(serialized.len(), 4);
+
+    let decoded = TestCustomNamedEnum::mls_decode(&mut &*serialized).unwrap();
+    assert_eq!(item, decoded);
 }
 
 mod test_with {

@@ -9,7 +9,7 @@ use darling::{
     FromDeriveInput, FromField, FromVariant,
 };
 use proc_macro2::{Literal, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     parse_macro_input, parse_quote, Attribute, DeriveInput, Expr, Generics, Ident, Index, Lit, Path,
 };
@@ -181,14 +181,25 @@ fn enum_impl(
 
             let discriminant = discriminant_for_variant(variant, &repr_ident);
 
-            // TODO: Support more than 1 field
-            match variant.fields.len() {
-                0 => quote! { #discriminant => Ok(#enum_name::#variant_name), },
-                1 =>{
-                    let path = variant.fields.fields[0].with.as_ref().unwrap_or(&path);
-                    quote! { #discriminant => Ok(#enum_name::#variant_name(#path::#call(#extras) #handle_error)), }
-                },
-                _ => panic!("Enum discriminants with more than 1 field are not currently supported")
+            let fields = variant.fields.iter().map(|field| {
+                let path = field.with.as_ref().unwrap_or(&path);
+                let value = quote! { #path::#call(#extras)#handle_error };
+
+                field
+                    .ident
+                    .as_ref()
+                    .map(|ident| quote! { #ident: #value })
+                    .unwrap_or(value)
+            });
+
+            match variant.fields.style {
+                ast::Style::Unit => quote! { #discriminant => Ok(#enum_name::#variant_name), },
+                ast::Style::Tuple => {
+                    quote! { #discriminant => Ok(#enum_name::#variant_name(#(#fields),*)), }
+                }
+                ast::Style::Struct => {
+                    quote! { #discriminant => Ok(#enum_name::#variant_name { #(#fields),* }), }
+                }
             }
         });
 
@@ -207,26 +218,43 @@ fn enum_impl(
 
         let discriminant = discriminant_for_variant(variant, &repr_ident);
 
-        let (parameter, field) = if variant.fields.is_empty() {
-            (None, None)
-        } else {
-            let path = variant.fields.fields[0].with.as_ref().unwrap_or(&path);
-
-            let start = match operation {
-                Operation::Size => Some(quote! { + }),
-                Operation::Encode => Some(quote! {;}),
-                Operation::Decode => None,
-            };
-
-            (
-                Some(quote! {(ref val)}),
-                Some(quote! { #start #path::#call (val #extras) #handle_error }),
-            )
-        };
-
         let discrim = quote! { #path::#call (&#discriminant #extras) #handle_error };
 
-        quote! { #enum_name::#variant_name #parameter => { #discrim #field }}
+        let start = match operation {
+            Operation::Size => quote! { + },
+            Operation::Encode => quote! { ; },
+            Operation::Decode => unreachable!(),
+        };
+
+        let (bindings, encodes): (Vec<_>, Vec<_>) = variant
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let path = field.with.as_ref().unwrap_or(&path);
+
+                let (binding, value) = match field.ident.as_ref() {
+                    Some(ident) => (quote! { ref #ident }, quote! { #ident }),
+                    None => {
+                        let ident = format_ident!("field_{}", index);
+                        (quote! { ref #ident }, quote! { #ident })
+                    }
+                };
+
+                (
+                    binding,
+                    quote! { #start #path::#call(#value #extras)#handle_error },
+                )
+            })
+            .unzip();
+
+        let pattern = match variant.fields.style {
+            ast::Style::Unit => quote! {},
+            ast::Style::Tuple => quote! { (#(#bindings),*) },
+            ast::Style::Struct => quote! { { #(#bindings),* } },
+        };
+
+        quote! { #enum_name::#variant_name #pattern => { #discrim #(#encodes)* } }
     });
 
     let enum_impl = quote! {
