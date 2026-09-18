@@ -508,9 +508,11 @@ impl MlsMessage {
     }
 
     /// Deserialize a message from transport.
+    ///
+    /// Returns an error if `bytes` holds data past the end of the message.
     #[inline(never)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MlsError> {
-        Self::mls_decode(&mut &*bytes).map_err(Into::into)
+        Self::mls_decode_exhaustive(bytes).map_err(Into::into)
     }
 
     /// Serialize a message for transport.
@@ -557,6 +559,21 @@ impl MlsMessage {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// If this is a plaintext commit message, return the references of all proposals
+    /// committed by reference. Each reference identifies a proposal that was previously
+    /// sent as its own message. If this is not a plaintext or not a commit, this returns
+    /// an empty list.
+    #[cfg(feature = "by_ref_proposal")]
+    pub fn proposals_by_reference(&self) -> Vec<&ProposalRef> {
+        match &self.payload {
+            MlsMessagePayload::Plain(plaintext) => match &plaintext.content.content {
+                Content::Commit(commit) => Self::find_reference_proposals(commit),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
         }
     }
 
@@ -624,6 +641,18 @@ impl MlsMessage {
             .iter()
             .filter_map(|p| match p {
                 ProposalOrRef::Proposal(p) => Some(p.as_ref()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "by_ref_proposal")]
+    fn find_reference_proposals(commit: &Commit) -> Vec<&ProposalRef> {
+        commit
+            .proposals
+            .iter()
+            .filter_map(|p| match p {
+                ProposalOrRef::Reference(r) => Some(r),
                 _ => None,
             })
             .collect()
@@ -874,5 +903,22 @@ mod tests {
             test_key_package_message(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "something").await;
 
         assert_eq!(key_package.description(), MlsMessageDescription::KeyPackage);
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn from_bytes_rejects_trailing_data() {
+        let message =
+            test_key_package_message(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "trailing").await;
+
+        let mut bytes = message.to_bytes().unwrap();
+
+        assert_eq!(MlsMessage::from_bytes(&bytes).unwrap(), message);
+
+        bytes.push(0);
+
+        assert_matches!(
+            MlsMessage::from_bytes(&bytes),
+            Err(MlsError::SerializationError(_))
+        );
     }
 }
