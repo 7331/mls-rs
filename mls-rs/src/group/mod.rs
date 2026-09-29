@@ -4409,6 +4409,71 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "psk")]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn reinit_succeeds_after_interior_member_removal() {
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, 3).await;
+
+        // Removing the member at leaf 1 leaves a blank slot between alice and carol
+        let commit = groups[0]
+            .commit_builder()
+            .remove_member(1)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        groups[0].apply_pending_commit().await.unwrap();
+        groups[2]
+            .process_message(commit.commit_message)
+            .await
+            .unwrap();
+
+        let mut carol = groups.remove(2);
+        let mut alice = groups.remove(0);
+
+        assert_eq!(alice.roster().members_iter().count(), 2);
+
+        let commit = alice
+            .commit_builder()
+            .reinit(
+                None,
+                TEST_PROTOCOL_VERSION,
+                TEST_CIPHER_SUITE,
+                group_extensions(),
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        alice.apply_pending_commit().await.unwrap();
+        carol.process_message(commit.commit_message).await.unwrap();
+
+        let alice_reinit = alice.group.get_reinit_client(None, None).unwrap();
+        let carol_reinit = carol.group.get_reinit_client(None, None).unwrap();
+
+        let key_package = carol_reinit.generate_key_package(None).await.unwrap();
+
+        // Same two members, packed into a tree with no blank slot
+        let (mut alice_group, welcome) = alice_reinit
+            .commit(vec![key_package], Default::default(), None)
+            .await
+            .unwrap();
+
+        let (mut carol_group, _) = carol_reinit.join(&welcome[0], None, None).await.unwrap();
+
+        assert_eq!(alice_group.roster().members_iter().count(), 2);
+
+        let commit = alice_group.commit(vec![]).await.unwrap();
+        alice_group.apply_pending_commit().await.unwrap();
+
+        carol_group
+            .process_incoming_message(commit.commit_message)
+            .await
+            .unwrap();
+    }
+
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
     async fn joining_group_fails_if_unsupported<F>(
         f: F,

@@ -345,7 +345,8 @@ async fn check_that_subgroup_is_a_subset<C: ClientConfig>(
     typ: GroupCreationType,
 ) -> Result<(), MlsError> {
     if matches!(typ, GroupCreationType::Reinit)
-        && old_roster.public_tree.len() != new_group.roster().public_tree.len()
+        && old_roster.public_tree.occupied_leaf_count()
+            != new_group.roster().public_tree.occupied_leaf_count()
     {
         return Err(MlsError::NotASubgroup);
     }
