@@ -740,7 +740,20 @@ where
             .ok_or(MlsError::GroupNotFound)?;
 
         let mut snapshot = Snapshot::mls_decode(&mut &**snapshot)?;
-        snapshot.state.public_tree.nodes = tree_data.0.into_owned();
+
+        let cipher_suite_provider = cipher_suite_provider(
+            self.config.crypto_provider(),
+            snapshot.state.context.cipher_suite,
+        )?;
+
+        snapshot
+            .state
+            .import_ratchet_tree(
+                tree_data.0.into_owned(),
+                &self.config.identity_provider(),
+                &cipher_suite_provider,
+            )
+            .await?;
 
         Group::from_snapshot(self.config.clone(), snapshot).await
     }
