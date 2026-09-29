@@ -56,6 +56,7 @@ where
         commit_time: Option<MlsTime>,
     ) -> Result<ApplyProposalsOutput, MlsError> {
         filter_out_removal_of_committer(commit_sender, proposals)?;
+        filter_out_external_init(proposals)?;
         filter_out_invalid_psks(self.cipher_suite_provider, proposals, self.psk_storage).await?;
 
         #[cfg(feature = "by_ref_proposal")]
@@ -164,6 +165,14 @@ fn filter_out_removal_of_committer(
     Ok(())
 }
 
+fn filter_out_external_init(proposals: &ProposalBundle) -> Result<(), MlsError> {
+    proposals
+        .external_initializations
+        .is_empty()
+        .then_some(())
+        .ok_or(MlsError::InvalidProposalTypeForSender)
+}
+
 #[cfg(feature = "by_ref_proposal")]
 #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
 async fn filter_out_invalid_group_extensions<C>(
@@ -230,4 +239,63 @@ pub(super) fn filter_out_unsupported_custom_proposals(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use assert_matches::assert_matches;
+
+    use crate::{
+        client::{test_utils::TEST_CIPHER_SUITE, MlsError},
+        crypto::test_utils::test_cipher_suite_provider,
+        group::{
+            proposal::{ExternalInit, Proposal},
+            proposal_filter::{ProposalBundle, ProposalSource},
+            test_utils::get_test_group_context,
+            Sender,
+        },
+        identity::basic::BasicIdentityProvider,
+        psk::AlwaysFoundPskStorage,
+        tree_kem::{leaf_node::test_utils::get_basic_test_node_sig_key, TreeKemPublic},
+        CipherSuiteProvider,
+    };
+
+    use super::ProposalApplier;
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn external_init_from_member_is_rejected() {
+        let cs = test_cipher_suite_provider(TEST_CIPHER_SUITE);
+        let (leaf, secret, _) = get_basic_test_node_sig_key(TEST_CIPHER_SUITE, "alice").await;
+
+        let (tree, _) =
+            TreeKemPublic::derive(leaf, secret, &BasicIdentityProvider, &Default::default())
+                .await
+                .unwrap();
+
+        let context = get_test_group_context(1, TEST_CIPHER_SUITE).await;
+
+        let mut proposals = ProposalBundle::default();
+
+        proposals.add(
+            Proposal::ExternalInit(ExternalInit {
+                kem_output: vec![33; cs.kdf_extract_size()],
+            }),
+            Sender::Member(0),
+            ProposalSource::ByValue,
+        );
+
+        let res = ProposalApplier::new(
+            &tree,
+            &cs,
+            &context,
+            None,
+            &BasicIdentityProvider,
+            &AlwaysFoundPskStorage,
+        )
+        .apply_proposals(&Sender::Member(0), &proposals, None)
+        .await;
+
+        assert_matches!(res, Err(MlsError::InvalidProposalTypeForSender));
+    }
 }

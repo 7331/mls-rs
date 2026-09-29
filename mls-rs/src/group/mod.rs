@@ -321,6 +321,13 @@ where
             )
             .await?;
 
+        // Verify that the cipher_suite in the GroupInfo matches the cipher_suite in the
+        // KeyPackage.
+        if group_info.group_context.cipher_suite != key_package_generation.key_package.cipher_suite
+        {
+            return Err(MlsError::CipherSuiteMismatch);
+        }
+
         let cipher_suite_provider = cipher_suite_provider(
             config.crypto_provider(),
             group_info.group_context.cipher_suite,
@@ -2091,6 +2098,10 @@ impl<C: ClientConfig> Group<C> {
             return Err(MlsError::ProtocolVersionMismatch);
         }
 
+        if key_package_generation.key_package.cipher_suite != welcome.cipher_suite {
+            return Err(MlsError::CipherSuiteMismatch);
+        }
+
         // Decrypt the encrypted_group_secrets using HPKE with the algorithms indicated by the
         // cipher suite and the HPKE private key corresponding to the GroupSecrets. If a
         // PreSharedKeyID is part of the GroupSecrets and the client is not in possession of
@@ -2481,8 +2492,8 @@ mod tests {
             test_client_with_key_pkg, TestClientBuilder, TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION,
         },
         client_builder::test_utils::TestClientConfig,
-        crypto::test_utils::test_cipher_suite_provider,
         crypto::test_utils::TestCryptoProvider,
+        crypto::test_utils::{test_cipher_suite_provider, try_test_cipher_suite_provider},
         group::proposal_filter::ProposalInfo,
         identity::basic::BasicIdentityProvider,
         identity::test_utils::{get_test_signing_identity, BasicWithCustomProvider},
@@ -3687,6 +3698,135 @@ mod tests {
         .map(|_| ());
 
         assert_matches!(bob_group, Err(MlsError::RatchetTreeNotFound));
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn joiner_rejects_welcome_with_cipher_suite_other_than_key_package() {
+        // CURVE25519_AES128 and CURVE25519_CHACHA share the KEM, KDF and signature scheme, so a
+        // committer can seat a joiner under a suite its KeyPackage never advertised.
+        let kp_suite = CipherSuite::CURVE25519_AES128;
+        let other_suite = CipherSuite::CURVE25519_CHACHA;
+
+        let (Some(kp_cs), Some(other_cs)) = (
+            try_test_cipher_suite_provider(*kp_suite),
+            try_test_cipher_suite_provider(*other_suite),
+        ) else {
+            return;
+        };
+
+        let mut alice = test_group_custom(
+            TEST_PROTOCOL_VERSION,
+            kp_suite,
+            Default::default(),
+            None,
+            Some(CommitOptions::new().with_ratchet_tree_extension(true)),
+        )
+        .await;
+
+        let (bob_client, bob_key_package) =
+            test_client_with_key_pkg(TEST_PROTOCOL_VERSION, kp_suite, "bob").await;
+
+        let commit_output = alice
+            .commit_builder()
+            .add_member(bob_key_package.clone())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        alice.apply_pending_commit().await.unwrap();
+
+        let mut welcome = commit_output.welcome_messages[0].clone();
+
+        // A Welcome whose own cipher suite differs from the KeyPackage's is rejected.
+        let mut other_suite_welcome = welcome.clone();
+
+        if let MlsMessagePayload::Welcome(w) = &mut other_suite_welcome.payload {
+            w.cipher_suite = other_suite;
+        }
+
+        let res = Group::join(
+            &other_suite_welcome,
+            None,
+            bob_client.config.clone(),
+            bob_client.signer.clone().unwrap(),
+            None,
+        )
+        .await
+        .map(|_| ());
+
+        assert_matches!(res, Err(MlsError::CipherSuiteMismatch));
+
+        // Re-seal the Welcome in the KeyPackage's suite around a GroupInfo that claims the other
+        // suite, with a valid signature and confirmation tag.
+        let (mut group_info, _, group_secrets, psk_secret) = Group::decrypt_group_info_internal(
+            &welcome,
+            &bob_client.config,
+            #[cfg(feature = "psk")]
+            None,
+        )
+        .await
+        .unwrap();
+
+        group_info.group_context.cipher_suite = other_suite;
+
+        let key_schedule = KeySchedule::from_joiner(
+            &other_cs,
+            &group_secrets.joiner_secret,
+            &group_info.group_context,
+            #[cfg(any(feature = "secret_tree_access", feature = "private_message"))]
+            alice.current_epoch_tree().total_leaf_count(),
+            &psk_secret,
+        )
+        .await
+        .unwrap();
+
+        group_info.confirmation_tag = ConfirmationTag::create(
+            &key_schedule.confirmation_key,
+            &group_info.group_context.confirmed_transcript_hash,
+            &other_cs,
+        )
+        .await
+        .unwrap();
+
+        group_info
+            .sign(&other_cs, &alice.signer, &())
+            .await
+            .unwrap();
+
+        let encrypted_group_info =
+            WelcomeSecret::from_joiner_secret(&kp_cs, &group_secrets.joiner_secret, &psk_secret)
+                .await
+                .unwrap()
+                .encrypt(&group_info.mls_encode_to_vec().unwrap())
+                .await
+                .unwrap();
+
+        let encrypted_group_secrets = group_secrets
+            .encrypt(
+                &kp_cs,
+                &bob_key_package.as_key_package().unwrap().hpke_init_key,
+                &encrypted_group_info,
+            )
+            .await
+            .unwrap();
+
+        if let MlsMessagePayload::Welcome(w) = &mut welcome.payload {
+            w.secrets[0].encrypted_group_secrets = encrypted_group_secrets;
+            w.encrypted_group_info = encrypted_group_info;
+        }
+
+        let res = Group::join(
+            &welcome,
+            None,
+            bob_client.config,
+            bob_client.signer.unwrap(),
+            None,
+        )
+        .await
+        .map(|_| ());
+
+        assert_matches!(res, Err(MlsError::CipherSuiteMismatch));
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
