@@ -245,6 +245,11 @@ where
             None,
         )?;
 
+        #[cfg(feature = "prior_epoch")]
+        state_repo
+            .ensure_ahead_of_stored_epochs(snapshot.state.context.epoch)
+            .await?;
+
         Ok(Group {
             config,
             state: snapshot

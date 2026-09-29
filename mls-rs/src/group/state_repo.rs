@@ -96,6 +96,28 @@ where
         }
     }
 
+    /// Fails if the storage holds epochs of this group that `epoch_id` does not continue. They
+    /// would make every later [`insert`](Self::insert) fail.
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn ensure_continues_stored_epochs(&self, epoch_id: u64) -> Result<(), MlsError> {
+        match self.find_max_id().await? {
+            Some(max_id) if max_id.checked_add(1) != Some(epoch_id) => {
+                Err(MlsError::StaleEpochsInStorage)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Fails if the storage already holds `epoch_id` or a later epoch of this group: the state
+    /// being loaded is older than what was last written.
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn ensure_ahead_of_stored_epochs(&self, epoch_id: u64) -> Result<(), MlsError> {
+        match self.find_max_id().await? {
+            Some(max_id) if max_id >= epoch_id => Err(MlsError::StaleEpochsInStorage),
+            _ => Ok(()),
+        }
+    }
+
     #[cfg(feature = "psk")]
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
     pub async fn resumption_secret(

@@ -447,6 +447,11 @@ where
             used_key_package_ref,
         )?;
 
+        #[cfg(feature = "prior_epoch")]
+        state_repo
+            .ensure_continues_stored_epochs(group_info.group_context.epoch)
+            .await?;
+
         let group = Group {
             config,
             state: GroupState::new(
@@ -6699,6 +6704,111 @@ mod tests {
 
         let res = groups[1].apply_pending_commit().await;
         assert_matches!(res, Err(MlsError::PendingCommitNotFound));
+    }
+
+    #[cfg(feature = "prior_epoch")]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn joining_on_storage_that_holds_epochs_of_an_earlier_membership_fails() {
+        let mut alice = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+
+        let (bob_client, key_package) =
+            test_client_with_key_pkg(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "bob").await;
+
+        let commit = alice
+            .commit_builder()
+            .add_member(key_package)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        alice.apply_pending_commit().await.unwrap();
+
+        let (mut bob, _) = bob_client
+            .join_group(None, &commit.welcome_messages[0], None)
+            .await
+            .unwrap();
+
+        let commit = alice.commit(vec![]).await.unwrap().commit_message;
+        alice.apply_pending_commit().await.unwrap();
+        bob.process_incoming_message(commit).await.unwrap();
+        bob.write_to_storage().await.unwrap();
+
+        let bob_index = bob.current_member_index();
+
+        alice
+            .commit_builder()
+            .remove_member(bob_index)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        alice.apply_pending_commit().await.unwrap();
+
+        let key_package = bob_client
+            .generate_key_package_message(Default::default(), Default::default(), None)
+            .await
+            .unwrap();
+
+        let commit = alice
+            .commit_builder()
+            .add_member(key_package)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let res = bob_client
+            .join_group(None, &commit.welcome_messages[0], None)
+            .await;
+
+        assert_matches!(res.map(|_| ()), Err(MlsError::StaleEpochsInStorage));
+    }
+
+    #[cfg(feature = "prior_epoch")]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn loading_a_snapshot_older_than_the_stored_epochs_fails() {
+        let mut group = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+        let old_snapshot = group.snapshot().unwrap();
+
+        group.commit(vec![]).await.unwrap();
+        group.apply_pending_commit().await.unwrap();
+        group.write_to_storage().await.unwrap();
+
+        let res = Group::from_snapshot(group.config.clone(), old_snapshot).await;
+
+        assert_matches!(res.map(|_| ()), Err(MlsError::StaleEpochsInStorage));
+    }
+
+    #[cfg(feature = "prior_epoch")]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn creating_a_group_whose_id_has_stored_epochs_fails() {
+        let mut group = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+
+        group.commit(vec![]).await.unwrap();
+        group.apply_pending_commit().await.unwrap();
+        group.write_to_storage().await.unwrap();
+
+        // What a ReInit into the same group id does under the hood
+        let signer = group.signer.clone();
+        let identity = group.current_member_signing_identity().unwrap().clone();
+
+        let res = Client::new(
+            group.config.clone(),
+            Some(signer),
+            Some((identity, TEST_CIPHER_SUITE)),
+            TEST_PROTOCOL_VERSION,
+        )
+        .create_group_with_id(
+            group.group_id().to_vec(),
+            Default::default(),
+            Default::default(),
+            None,
+        )
+        .await;
+
+        assert_matches!(res.map(|_| ()), Err(MlsError::StaleEpochsInStorage));
     }
 
     #[cfg(feature = "by_ref_proposal")]

@@ -215,6 +215,11 @@ impl<C: ClientConfig + Clone> GroupBuilder<C> {
             None,
         )?;
 
+        #[cfg(feature = "prior_epoch")]
+        state_repo
+            .ensure_continues_stored_epochs(context.epoch)
+            .await?;
+
         let key_schedule_result = KeySchedule::from_random_epoch_secret(
             &cipher_suite_provider,
             #[cfg(any(feature = "secret_tree_access", feature = "private_message"))]
