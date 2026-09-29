@@ -514,6 +514,12 @@ where
             Sender::Member(*self.private_tree.self_index)
         };
 
+        // The committer's leaf is only rewritten by an UpdatePath, so a new signer or new leaf
+        // node extensions can only take effect if the commit carries one.
+        let committer_leaf_changed = new_signer.is_some()
+            || new_signing_identity.is_some()
+            || new_leaf_node_extensions.is_some();
+
         let new_signer = new_signer.unwrap_or_else(|| self.signer.clone());
         let old_signer = &self.signer;
 
@@ -573,6 +579,7 @@ where
             .map_err(|e| MlsError::MlsRulesError(e.into_any_error()))?;
 
         let perform_path_update = commit_options.path_required
+            || committer_leaf_changed
             || path_update_required(&provisional_state.applied_proposals, &mls_rules);
 
         let (update_path, path_secrets, commit_secret) = if perform_path_update {
@@ -1412,6 +1419,89 @@ mod tests {
             new_member.signing_identity.signature_key,
             identity.signature_key
         );
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn add_commit_with_new_signing_identity_includes_path() {
+        let cs = TEST_CIPHER_SUITE;
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, cs, 2).await;
+        let (identity, secret_key) = get_test_signing_identity(cs, b"member").await;
+
+        let (carol, carol_kp) = test_client_with_key_pkg(TEST_PROTOCOL_VERSION, cs, "carol").await;
+
+        let commit_output = groups[0]
+            .commit_builder()
+            .add_member(carol_kp)
+            .unwrap()
+            .set_new_signing_identity(secret_key, identity.clone())
+            .build()
+            .await
+            .unwrap();
+
+        assert!(commit_output.contains_update_path);
+
+        groups[0].apply_pending_commit().await.unwrap();
+
+        groups[1]
+            .process_message(commit_output.commit_message)
+            .await
+            .unwrap();
+
+        // The Welcome's GroupInfo is signed with the new key, so it must verify against the
+        // committer's leaf.
+        let (mut carol_group, _) = carol
+            .join_group(None, &commit_output.welcome_messages[0], None)
+            .await
+            .unwrap();
+
+        let committer = carol_group.roster().member_with_index(0).unwrap();
+        assert_eq!(committer.signing_identity, identity);
+
+        // Later commits from the committer are signed with the new key and verify for everyone.
+        let commit_output = groups[0].commit(vec![]).await.unwrap();
+
+        groups[1]
+            .process_message(commit_output.commit_message.clone())
+            .await
+            .unwrap();
+
+        carol_group
+            .process_incoming_message(commit_output.commit_message)
+            .await
+            .unwrap();
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn add_commit_with_new_leaf_node_extensions_includes_path() {
+        let mut group = test_commit_builder_group().await;
+
+        let (_, bob_kp) =
+            test_client_with_key_pkg(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "bob").await;
+
+        let mut extension_list = ExtensionList::new();
+        extension_list.set_from(TestExtension { foo: 42 }).unwrap();
+
+        let commit_output = group
+            .commit_builder()
+            .add_member(bob_kp)
+            .unwrap()
+            .set_leaf_node_extensions(extension_list)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(commit_output.contains_update_path);
+
+        group.apply_pending_commit().await.unwrap();
+
+        let ext = group
+            .current_user_leaf_node()
+            .unwrap()
+            .extensions
+            .get_as::<TestExtension>()
+            .unwrap();
+
+        assert_eq!(ext, Some(TestExtension { foo: 42 }));
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
