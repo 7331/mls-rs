@@ -28,7 +28,7 @@ use crate::{
         state::GroupState,
         transcript_hash::InterimTranscriptHash,
         validate_tree_and_info_joiner, ContentType, ExportedTree, GroupContext, GroupInfo, Roster,
-        Welcome,
+        Sender, Welcome,
     },
     identity::SigningIdentity,
     protocol_version::ProtocolVersion,
@@ -52,7 +52,6 @@ use crate::{
         message_signature::AuthenticatedContent,
         proposal::Proposal,
         proposal_ref::ProposalRef,
-        Sender,
     },
     WireFormat,
 };
@@ -103,6 +102,11 @@ pub enum ExternalReceivedMessage {
 
 /// A handle to an observed group that can track plaintext control messages
 /// and the resulting group state.
+///
+/// An external group holds no pre-shared keys, so every external PSK
+/// referenced by a proposal is treated as available. A commit that uses a
+/// PSK the members do not hold is therefore accepted here but rejected by
+/// those members.
 #[derive(Clone)]
 pub struct ExternalGroup<C>
 where
@@ -653,6 +657,12 @@ where
         &self,
         message: PublicMessage,
     ) -> Result<EventOrContent<Self::OutputType>, MlsError> {
+        // Without the membership key the tag cannot be checked, but a member
+        // sender must still carry one, as it must for any group member.
+        if matches!(message.content.sender, Sender::Member(_)) && message.membership_tag.is_none() {
+            return Err(MlsError::InvalidMembershipTag);
+        }
+
         let auth_content = crate::group::message_verifier::verify_plaintext_authentication(
             &self.cipher_suite_provider,
             message,
@@ -741,7 +751,7 @@ where
     fn min_epoch_available(&self) -> Option<u64> {
         self.config
             .max_epoch_jitter()
-            .map(|j| self.state.context.epoch - j)
+            .map(|j| self.state.context.epoch.saturating_sub(j))
     }
 
     fn cipher_suite_provider(&self) -> &Self::CipherSuiteProvider {
@@ -903,7 +913,7 @@ mod tests {
             proposal_ref::ProposalRef,
             snapshot::RawGroupState,
             test_utils::{test_group, TestGroup},
-            CommitMessageDescription, ExportedTree, ProposalMessageDescription,
+            CommitMessageDescription, ContentType, ExportedTree, ProposalMessageDescription,
         },
         identity::{test_utils::get_test_signing_identity, SigningIdentity},
         key_package::test_utils::{test_key_package, test_key_package_message},
@@ -1330,6 +1340,54 @@ mod tests {
         let res = server.process_incoming_message(old_application_msg).await;
 
         assert_matches!(res, Err(MlsError::InvalidEpoch));
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn external_group_epoch_jitter_larger_than_epoch() {
+        let mut alice = test_group_with_one_commit(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+
+        let mut server = make_external_group_with_config(
+            &alice,
+            TestExternalClientBuilder::new_for_test()
+                .max_epoch_jitter(5)
+                .build_config(),
+        )
+        .await;
+
+        let application_msg = alice
+            .encrypt_application_message(&[], vec![])
+            .await
+            .unwrap();
+
+        // The group is at epoch 1, below the jitter of 5, so the lower bound
+        // must clamp to 0 rather than wrap.
+        let res = server.process_incoming_message(application_msg).await;
+
+        assert_matches!(
+            res,
+            Ok(ExternalReceivedMessage::Ciphertext(
+                ContentType::Application
+            ))
+        );
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn external_group_rejects_member_message_without_membership_tag() {
+        let mut alice = test_group_with_one_commit(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+        let mut server = make_external_group(&alice).await;
+
+        let mut commit_output = alice.commit(Vec::new()).await.unwrap();
+
+        match commit_output.commit_message.payload {
+            MlsMessagePayload::Plain(ref mut plain) => plain.membership_tag = None,
+            _ => panic!("Unexpected non-plaintext data"),
+        };
+
+        let res = server
+            .process_incoming_message(commit_output.commit_message)
+            .await;
+
+        assert_matches!(res, Err(MlsError::InvalidMembershipTag));
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
