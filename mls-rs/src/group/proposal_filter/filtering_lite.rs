@@ -215,9 +215,17 @@ pub(super) fn filter_out_unsupported_custom_proposals(
     proposals: &ProposalBundle,
     tree: &TreeKemPublic,
 ) -> Result<(), MlsError> {
+    // RFC 9420 section 12.2: members being removed by the commit do not need to support the
+    // proposal type.
+    let removed = proposals
+        .removals
+        .iter()
+        .map(|p| p.proposal.to_remove)
+        .collect_vec();
+
     let supported_types = proposals
         .custom_proposal_types()
-        .filter(|t| tree.can_support_proposal(*t))
+        .filter(|t| tree.can_support_proposal(*t, &removed))
         .collect_vec();
 
     for p in &proposals.custom_proposals {

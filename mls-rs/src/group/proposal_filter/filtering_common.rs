@@ -344,7 +344,7 @@ where
 }
 
 #[cfg(all(feature = "custom_proposal", feature = "by_ref_proposal"))]
-pub(crate) fn prepare_proposals_for_mls_rules(
+pub(crate) fn filter_out_unsupported_proposals(
     proposals: &mut ProposalBundle,
     direction: CommitDirection,
     tree: &TreeKemPublic,
@@ -353,7 +353,7 @@ pub(crate) fn prepare_proposals_for_mls_rules(
 }
 
 #[cfg(all(feature = "custom_proposal", not(feature = "by_ref_proposal")))]
-pub(crate) fn prepare_proposals_for_mls_rules(
+pub(crate) fn filter_out_unsupported_proposals(
     proposals: &mut ProposalBundle,
     _direction: CommitDirection,
     tree: &TreeKemPublic,
@@ -362,7 +362,7 @@ pub(crate) fn prepare_proposals_for_mls_rules(
 }
 
 #[cfg(not(feature = "custom_proposal"))]
-pub(crate) fn prepare_proposals_for_mls_rules(
+pub(crate) fn filter_out_unsupported_proposals(
     _: &mut ProposalBundle,
     _: CommitDirection,
     _: &TreeKemPublic,

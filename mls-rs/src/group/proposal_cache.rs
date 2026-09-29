@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use super::{
     message_processor::ProvisionalState,
     mls_rules::{CommitDirection, CommitSource, MlsRules},
-    proposal_filter::prepare_proposals_for_mls_rules,
+    proposal_filter::filter_out_unsupported_proposals,
     GroupState, ProposalOrRef,
 };
 use crate::{
@@ -294,12 +294,12 @@ impl GroupState {
             )),
         }?;
 
-        prepare_proposals_for_mls_rules(&mut proposals, direction, &self.public_tree)?;
-
         proposals = user_rules
             .filter_proposals(direction, origin, &roster, &self.context, proposals)
             .await
             .map_err(|e| MlsError::MlsRulesError(e.into_any_error()))?;
+
+        filter_out_unsupported_proposals(&mut proposals, direction, &self.public_tree)?;
 
         let applier = ProposalApplier::new(
             &self.public_tree,
@@ -725,6 +725,9 @@ mod tests {
 
     #[cfg(feature = "custom_proposal")]
     use crate::group::proposal::CustomProposal;
+
+    #[cfg(all(feature = "custom_proposal", feature = "self_remove_proposal"))]
+    use crate::group::SelfRemoveProposal;
 
     use assert_matches::assert_matches;
     use core::convert::Infallible;
@@ -3566,6 +3569,78 @@ mod tests {
             res,
             Err(MlsError::UnsupportedCustomProposal(c)) if c == custom_proposal.proposal_type()
         );
+    }
+
+    #[cfg(all(feature = "custom_proposal", feature = "self_remove_proposal"))]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn receiving_self_remove_with_member_not_supporting_fails() {
+        let (alice, mut tree) =
+            new_tree_custom_proposals("alice", vec![ProposalType::SELF_REMOVE]).await;
+
+        let bob = add_member(&mut tree, "bob").await;
+        let carol = add_member(&mut tree, "carol").await;
+
+        let self_remove = Proposal::SelfRemove(SelfRemoveProposal {});
+        let self_remove_ref = make_proposal_ref(&self_remove, bob).await;
+
+        let res = CommitReceiver::new(
+            &tree,
+            alice,
+            carol,
+            test_cipher_suite_provider(TEST_CIPHER_SUITE),
+        )
+        .cache(self_remove_ref.clone(), self_remove, bob)
+        .receive([self_remove_ref])
+        .await;
+
+        assert_matches!(
+            res,
+            Err(MlsError::UnsupportedCustomProposal(t)) if t == ProposalType::SELF_REMOVE
+        );
+    }
+
+    #[cfg(feature = "custom_proposal")]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn sending_custom_proposal_returned_by_rules_with_member_not_supporting_fails() {
+        let (alice, tree) = new_tree("alice").await;
+
+        let custom_proposal = Proposal::Custom(CustomProposal::new(ProposalType::new(42), vec![]));
+
+        let res = CommitSender::new(&tree, alice, test_cipher_suite_provider(TEST_CIPHER_SUITE))
+            .with_user_rules(InjectMlsRules {
+                to_inject: vec![custom_proposal.clone()],
+                source: ProposalSource::ByValue,
+            })
+            .send()
+            .await;
+
+        assert_matches!(
+            res,
+            Err(MlsError::UnsupportedCustomProposal(c)) if c == custom_proposal.proposal_type()
+        );
+    }
+
+    #[cfg(feature = "custom_proposal")]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn sending_custom_proposal_with_only_removed_member_not_supporting_succeeds() {
+        let (alice, mut tree) =
+            new_tree_custom_proposals("alice", vec![ProposalType::new(42)]).await;
+
+        let bob = add_member(&mut tree, "bob").await;
+
+        let custom_proposal = Proposal::Custom(CustomProposal::new(ProposalType::new(42), vec![]));
+        let remove = Proposal::Remove(RemoveProposal { to_remove: bob });
+
+        let (committed, _) =
+            CommitSender::new(&tree, alice, test_cipher_suite_provider(TEST_CIPHER_SUITE))
+                .with_additional([custom_proposal.clone(), remove.clone()])
+                .send()
+                .await
+                .unwrap();
+
+        assert_eq!(committed.len(), 2);
+        assert!(committed.contains(&ProposalOrRef::Proposal(custom_proposal.into())));
+        assert!(committed.contains(&ProposalOrRef::Proposal(remove.into())));
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]

@@ -243,15 +243,22 @@ impl TreeKemPublic {
         )
     }
 
+    /// Whether every member except those in `excluded` supports `proposal_type`.
     #[cfg(feature = "custom_proposal")]
-    pub fn can_support_proposal(&self, proposal_type: ProposalType) -> bool {
+    pub fn can_support_proposal(
+        &self,
+        proposal_type: ProposalType,
+        excluded: &[LeafIndex],
+    ) -> bool {
         #[cfg(feature = "tree_index")]
-        return self.index.count_supporting_proposal(proposal_type) == self.occupied_leaf_count();
+        if excluded.is_empty() {
+            return self.index.count_supporting_proposal(proposal_type)
+                == self.occupied_leaf_count();
+        }
 
-        #[cfg(not(feature = "tree_index"))]
-        self.nodes
-            .non_empty_leaves()
-            .all(|(_, l)| l.capabilities.proposals.contains(&proposal_type))
+        self.nodes.non_empty_leaves().all(|(i, l)| {
+            excluded.contains(&i) || l.capabilities.proposals.contains(&proposal_type)
+        })
     }
 
     #[cfg(test)]
@@ -1680,8 +1687,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(tree.can_support_proposal(test_proposal_type));
-        assert!(!tree.can_support_proposal(ProposalType::from(43)));
+        assert!(tree.can_support_proposal(test_proposal_type, &[]));
+        assert!(!tree.can_support_proposal(ProposalType::from(43), &[]));
 
         let test_node = get_basic_test_node(TEST_CIPHER_SUITE, "another").await;
 
@@ -1693,6 +1700,6 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!tree.can_support_proposal(test_proposal_type));
+        assert!(!tree.can_support_proposal(test_proposal_type, &[]));
     }
 }

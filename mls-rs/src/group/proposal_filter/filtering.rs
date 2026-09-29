@@ -674,6 +674,25 @@ pub(crate) fn filter_out_invalid_proposers(
     Ok(proposals)
 }
 
+/// Members removed by the commit do not need to support its proposal types (RFC 9420 section 12.2).
+#[cfg(feature = "custom_proposal")]
+fn leaves_removed_by(proposals: &ProposalBundle) -> Vec<LeafIndex> {
+    let removed = proposals.removals.iter().map(|p| p.proposal.to_remove);
+
+    #[cfg(feature = "self_remove_proposal")]
+    let removed = removed.chain(
+        proposals
+            .self_removes
+            .iter()
+            .filter_map(|p| match p.sender {
+                Sender::Member(i) => LeafIndex::try_from(i).ok(),
+                _ => None,
+            }),
+    );
+
+    removed.collect()
+}
+
 fn leaf_index_of_update_sender(p: &ProposalInfo<UpdateProposal>) -> Result<LeafIndex, MlsError> {
     match p.sender {
         Sender::Member(i) => LeafIndex::try_from(i),
@@ -687,9 +706,30 @@ pub(super) fn filter_out_unsupported_custom_proposals(
     tree: &TreeKemPublic,
     strategy: FilterStrategy,
 ) -> Result<(), MlsError> {
+    #[cfg(feature = "self_remove_proposal")]
+    if !proposals.self_removes.is_empty() {
+        let removed = leaves_removed_by(proposals);
+
+        let supported = tree.can_support_proposal(ProposalType::SELF_REMOVE, &removed);
+
+        proposals.retain_by_type::<SelfRemoveProposal, _, _>(|p| {
+            apply_strategy(
+                strategy,
+                p.is_by_reference(),
+                supported
+                    .then_some(())
+                    .ok_or(MlsError::UnsupportedCustomProposal(
+                        ProposalType::SELF_REMOVE,
+                    )),
+            )
+        })?;
+    }
+
+    let removed = leaves_removed_by(proposals);
+
     let supported_types = proposals
         .custom_proposal_types()
-        .filter(|t| tree.can_support_proposal(*t))
+        .filter(|t| tree.can_support_proposal(*t, &removed))
         .collect_vec();
 
     proposals.retain_custom(|p| {
