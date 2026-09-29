@@ -64,6 +64,11 @@ pub enum MlsError {
     CommitMissingPath,
     #[cfg_attr(feature = "std", error("plaintext message for incorrect epoch"))]
     InvalidEpoch,
+    #[cfg_attr(
+        feature = "std",
+        error("commit secrets were not created in the current epoch")
+    )]
+    CommitSecretsEpochMismatch,
     #[cfg_attr(feature = "std", error("invalid signature found"))]
     InvalidSignature,
     #[cfg_attr(feature = "std", error("invalid confirmation tag"))]

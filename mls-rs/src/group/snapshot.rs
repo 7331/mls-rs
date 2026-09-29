@@ -345,8 +345,13 @@ mod tests {
     };
 
     #[cfg(all(feature = "std", feature = "by_ref_proposal"))]
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn legacy_interop() {
+    use super::PendingCommitSnapshot;
+    #[cfg(all(feature = "std", feature = "by_ref_proposal"))]
+    use crate::group::{message_hash::MessageHash, ReceivedMessage};
+
+    #[cfg(all(feature = "std", feature = "by_ref_proposal"))]
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    async fn load_legacy_group() -> Group<crate::client_builder::test_utils::TestClientConfig> {
         let mut storage = InMemoryGroupStateStorage::new();
 
         let legacy_snapshot = include_bytes!(concat!(
@@ -368,12 +373,41 @@ mod tests {
             .group_state_storage(storage)
             .build();
 
-        let mut group = client.load_group(b"group").await.unwrap();
+        client.load_group(b"group").await.unwrap()
+    }
+
+    #[cfg(all(feature = "std", feature = "by_ref_proposal"))]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn legacy_interop() {
+        let mut group = load_legacy_group().await;
 
         group
             .apply_pending_commit_backwards_compatible()
             .await
             .unwrap();
+    }
+
+    #[cfg(all(feature = "std", feature = "by_ref_proposal"))]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn legacy_pending_commit_is_applied_on_echo() {
+        let mut group = load_legacy_group().await;
+
+        let PendingCommitSnapshot::LegacyPendingCommit(legacy) = &group.pending_commit else {
+            panic!("expected a legacy pending commit");
+        };
+
+        let content = legacy.content.clone();
+        let expected_hash = legacy.commit_message_hash.clone();
+
+        let echo = group.format_for_wire(content).await.unwrap();
+
+        let hash = MessageHash::compute(&group.cipher_suite_provider, &echo)
+            .await
+            .unwrap();
+        assert_eq!(hash, expected_hash);
+
+        let received = group.process_incoming_message(echo).await.unwrap();
+        assert_matches::assert_matches!(received, ReceivedMessage::Commit(_));
     }
 
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
