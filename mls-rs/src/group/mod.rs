@@ -1540,6 +1540,15 @@ where
             _ => return Err(MlsError::PendingCommitNotFound),
         };
 
+        if pending.state.context.group_id != self.context().group_id {
+            return Err(MlsError::GroupIdMismatch);
+        }
+
+        // Created in the current epoch and not applied yet
+        if Some(pending.state.context.epoch) != self.context().epoch.checked_add(1) {
+            return Err(MlsError::CommitSecretsEpochMismatch);
+        }
+
         self.insert_past_epoch().await?;
 
         self.state = pending.state;
@@ -1627,7 +1636,7 @@ where
             let message_hash = MessageHash::compute(&self.cipher_suite_provider, &message).await?;
 
             if message_hash == pending {
-                let message_description = self.apply_pending_commit().await?;
+                let message_description = self.apply_pending_commit_backwards_compatible().await?;
 
                 return Ok(ReceivedMessage::Commit(message_description));
             }
@@ -1681,7 +1690,7 @@ where
             let message_hash = MessageHash::compute(&self.cipher_suite_provider, &message).await?;
 
             if message_hash == pending {
-                let message_description = self.apply_pending_commit().await?;
+                let message_description = self.apply_pending_commit_backwards_compatible().await?;
 
                 return Ok(ReceivedMessage::Commit(message_description));
             }

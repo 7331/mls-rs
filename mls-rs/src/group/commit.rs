@@ -1788,6 +1788,56 @@ mod tests {
         assert_eq!(group.context().epoch, 1);
     }
 
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn detached_commit_cannot_be_applied_twice() {
+        let mut group = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+
+        let (_commit, secrets) = group.commit_builder().build_detached().await.unwrap();
+        group.apply_detached_commit(secrets.clone()).await.unwrap();
+
+        let res = group.apply_detached_commit(secrets).await;
+        assert_matches::assert_matches!(res, Err(MlsError::CommitSecretsEpochMismatch));
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn detached_commit_cannot_be_applied_after_another_commit() {
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, 2).await;
+
+        let (_commit, secrets) = groups[0].commit_builder().build_detached().await.unwrap();
+
+        let commit = groups[1].commit(vec![]).await.unwrap().commit_message;
+        groups[0].process_incoming_message(commit).await.unwrap();
+
+        let res = groups[0].apply_detached_commit(secrets).await;
+        assert_matches::assert_matches!(res, Err(MlsError::CommitSecretsEpochMismatch));
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn detached_commit_from_another_group_is_rejected() {
+        let mut group = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+
+        let (identity, secret_key) = get_test_signing_identity(TEST_CIPHER_SUITE, b"member").await;
+
+        let mut other = ClientBuilder::new()
+            .crypto_provider(TestCryptoProvider::new())
+            .identity_provider(BasicIdentityProvider::new())
+            .signing_identity(identity, secret_key, TEST_CIPHER_SUITE)
+            .build()
+            .create_group_with_id(
+                b"other".to_vec(),
+                Default::default(),
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (_commit, secrets) = other.commit_builder().build_detached().await.unwrap();
+
+        let res = group.apply_detached_commit(secrets).await;
+        assert_matches::assert_matches!(res, Err(MlsError::GroupIdMismatch));
+    }
+
     #[cfg(feature = "tree_index")]
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
     async fn tree_index_consistent_after_committer_self_update() {
