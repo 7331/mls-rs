@@ -13,7 +13,7 @@ use crate::{
         message_hash::MessageHash, state_repo::GroupStateRepository, ConfirmationTag, Group,
         GroupContext, GroupState, InterimTranscriptHash, ReInitProposal, TreeKemPublic,
     },
-    tree_kem::TreeKemPrivate,
+    tree_kem::{node::NodeVec, TreeKemPrivate},
 };
 
 #[cfg(feature = "by_ref_proposal")]
@@ -27,8 +27,7 @@ use crate::{
 };
 
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
-use mls_rs_core::crypto::SignatureSecretKey;
-#[cfg(feature = "tree_index")]
+use mls_rs_core::crypto::{CipherSuiteProvider, SignatureSecretKey};
 use mls_rs_core::identity::IdentityProvider;
 
 use super::PendingCommit;
@@ -106,6 +105,33 @@ pub(crate) struct RawGroupState {
 }
 
 impl RawGroupState {
+    /// Replace the public tree with `nodes`, rebuilding the index and tree
+    /// hashes from scratch and checking the result against the tree hash in
+    /// the group context.
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub(crate) async fn import_ratchet_tree<IP, P>(
+        &mut self,
+        nodes: NodeVec,
+        identity_provider: &IP,
+        cipher_suite_provider: &P,
+    ) -> Result<(), MlsError>
+    where
+        IP: IdentityProvider,
+        P: CipherSuiteProvider,
+    {
+        let mut public_tree =
+            TreeKemPublic::import_node_data(nodes, identity_provider, &self.context.extensions)
+                .await?;
+
+        if public_tree.tree_hash(cipher_suite_provider).await? != self.context.tree_hash {
+            return Err(MlsError::TreeHashMismatch);
+        }
+
+        self.public_tree = public_tree;
+
+        Ok(())
+    }
+
     pub(crate) fn export(state: &GroupState) -> Self {
         #[cfg(feature = "tree_index")]
         let public_tree = state.public_tree.clone();

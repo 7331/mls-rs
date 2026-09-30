@@ -1606,4 +1606,29 @@ mod tests {
 
         assert_eq!(restored.group_state(), server.group_state());
     }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn external_group_loading_with_tree_from_other_epoch_fails() {
+        let mut alice = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+        let mut server = make_external_group(&alice).await;
+        let stale_tree = server.export_tree().unwrap();
+
+        let commit_output = alice.commit(Vec::new()).await.unwrap();
+        alice.apply_pending_commit().await.unwrap();
+
+        server
+            .process_incoming_message(commit_output.commit_message)
+            .await
+            .unwrap();
+
+        let res = ExternalClient::new(server.config.clone(), None)
+            .load_group_with_ratchet_tree(
+                server.snapshot_without_ratchet_tree(),
+                ExportedTree::from_bytes(&stale_tree).unwrap(),
+            )
+            .await
+            .map(|_| ());
+
+        assert_matches!(res, Err(MlsError::TreeHashMismatch));
+    }
 }

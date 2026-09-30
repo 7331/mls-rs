@@ -6890,6 +6890,24 @@ mod tests {
         assert_eq!(restored.group_state(), group.group_state());
     }
 
+    #[cfg(feature = "std")]
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn loading_with_tree_from_other_epoch_fails() {
+        let mut group = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
+        let stale_tree = group.export_tree().into_owned();
+
+        group.commit(vec![]).await.unwrap();
+        group.apply_pending_commit().await.unwrap();
+        group.write_to_storage_without_ratchet_tree().await.unwrap();
+
+        let res = Client::new(group.config.clone(), None, None, TEST_PROTOCOL_VERSION)
+            .load_group_with_ratchet_tree(group.group_id(), stale_tree)
+            .await
+            .map(|_| ());
+
+        assert_matches!(res, Err(MlsError::TreeHashMismatch));
+    }
+
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
     async fn delete_exporter() {
         let mut group = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
