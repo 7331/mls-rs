@@ -209,12 +209,14 @@ impl<'a, C: IdentityProvider, CP: CipherSuiteProvider> LeafNodeValidator<'a, C, 
         // If required capabilities are specified, verify the leaf node meets the requirements
         self.validate_required_capabilities(leaf_node)?;
 
-        // If there are extensions, make sure they are referenced in the capabilities field
+        // If there are non-default extensions, make sure they are referenced in the capabilities
+        // field. Default extension types MUST NOT be listed there (RFC 9420 section 7.2).
         for one_ext in &*leaf_node.extensions {
-            if !leaf_node
-                .capabilities
-                .extensions
-                .contains(&one_ext.extension_type)
+            if !one_ext.extension_type.is_default()
+                && !leaf_node
+                    .capabilities
+                    .extensions
+                    .contains(&one_ext.extension_type)
             {
                 return Err(MlsError::ExtensionNotInCapabilities(one_ext.extension_type));
             }
@@ -283,6 +285,7 @@ mod tests {
     use crate::crypto::test_utils::TestCryptoProvider;
     use crate::crypto::SignatureSecretKey;
     use crate::extension::test_utils::TestExtension;
+    use crate::extension::ApplicationIdExt;
     use crate::group::test_utils::random_bytes;
     use crate::identity::basic::BasicCredential;
     use crate::identity::basic::BasicIdentityProvider;
@@ -532,6 +535,37 @@ mod tests {
 
         assert_matches!(res,
             Err(MlsError::ExtensionNotInCapabilities(ext)) if ext == 42.into());
+    }
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn test_default_extension_not_required_in_capabilities() {
+        let (signing_identity, secret) = get_test_signing_identity(TEST_CIPHER_SUITE, b"foo").await;
+
+        let mut extensions = ExtensionList::new();
+
+        extensions
+            .set_from(ApplicationIdExt::new(b"app".to_vec()))
+            .unwrap();
+
+        let (leaf_node, _) = get_test_node(
+            TEST_CIPHER_SUITE,
+            signing_identity,
+            &secret,
+            None,
+            Some(extensions),
+        )
+        .await;
+
+        let cipher_suite_provider = test_cipher_suite_provider(TEST_CIPHER_SUITE);
+
+        let test_validator =
+            LeafNodeValidator::new_for_test(&cipher_suite_provider, &BasicIdentityProvider);
+
+        let res = test_validator
+            .check_if_valid(&leaf_node, ValidationContext::Add(None))
+            .await;
+
+        assert_matches!(res, Ok(()));
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
